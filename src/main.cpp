@@ -42,7 +42,7 @@ void setup() {
   tft.println("CAN Analyzer");
   tft.println("Initializing...");
 
-  if (CAN.begin(MCP_ANY, CAN_500KBPS, MCP_8MHZ) == CAN_OK) {
+  if (CAN.begin(MCP_ANY, CAN_250KBPS, MCP_8MHZ) == CAN_OK) {
     Serial.println("CAN BUS Shield init OK!");
     tft.setTextColor(ST77XX_GREEN);
     tft.println("CAN: OK");
