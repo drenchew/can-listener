@@ -2,6 +2,10 @@
 #include <mcp_can.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7735.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/queue.h>
+#include <freertos/semphr.h>
 
 const int SPI_CS_PIN = 5;
 const int CAN_INT_PIN = 4;
@@ -14,7 +18,16 @@ MCP_CAN CAN(SPI_CS_PIN);
 Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 
 int displayLine = 0;
-const int MAX_LINES = 10; 
+const int MAX_LINES = 10;
+
+typedef struct {
+  uint32_t id;
+  uint8_t len;
+  uint8_t data[8];
+} CANMessage;
+
+QueueHandle_t canMessageQueue;
+SemaphoreHandle_t displayMutex; 
 
 void setup() {
   Serial.begin(115200);
@@ -51,36 +64,72 @@ void setup() {
   tft.setCursor(0, 0);
   tft.println("CAN Messages:");
   displayLine = 1;
+
+  canMessageQueue = xQueueCreate(10, sizeof(CANMessage));
+  displayMutex = xSemaphoreCreateMutex();
+
+  xTaskCreatePinnedToCore(canReaderTask, "CAN Reader", 4096, NULL, 2, NULL, 0);
+  xTaskCreatePinnedToCore(displayTask, "Display", 4096, NULL, 1, NULL, 1);
+  xTaskCreatePinnedToCore(serialTask, "Serial", 2048, NULL, 1, NULL, 0);
 }
 
 void loop() {
-  if (!digitalRead(CAN_INT_PIN)) {
-    long unsigned int id;
-    unsigned char len = 0;
-    unsigned char buf[8];
+  vTaskDelete(NULL);
+}
 
-    if (CAN.readMsgBuf(&id, &len, buf) == CAN_OK) {
-      Serial.print("ID: 0x");
-      Serial.print(id, HEX);
-      Serial.print(" DLC: ");
-      Serial.print(len);
-      Serial.print(" Data: ");
-      for (int i = 0; i < len; i++) {
-        Serial.print(buf[i], HEX);
-        Serial.print(" ");
-      }
-      Serial.println();
+void canReaderTask(void *parameter) {
+  while (1) {
+    if (!digitalRead(CAN_INT_PIN)) {
+      CANMessage msg;
+      unsigned char buf[8];
+      long unsigned int id;
+      unsigned char len;
       
-      displayCANMessage(id, len, buf);
+      if (CAN.readMsgBuf(&id, &len, buf) == CAN_OK) {
+        msg.id = id;
+        msg.len = len;
+        memcpy(msg.data, buf, len);
+        xQueueSend(canMessageQueue, &msg, portMAX_DELAY);
+      }
     }
-    else{
-      Serial.println("Couldn't read any can msg!");
-      delay(1000);
+    vTaskDelay(pdMS_TO_TICKS(1));
+  }
+}
+
+void displayTask(void *parameter) {
+  CANMessage msg;
+  
+  while (1) {
+    if (xQueueReceive(canMessageQueue, &msg, portMAX_DELAY) == pdTRUE) {
+      if (xSemaphoreTake(displayMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        displayCANMessage(msg.id, msg.len, msg.data);
+        xSemaphoreGive(displayMutex);
+      }
     }
   }
 }
 
-void displayCANMessage(long unsigned int id, unsigned char len, unsigned char* data) {
+void serialTask(void *parameter) {
+  CANMessage msg;
+  
+  while (1) {
+    if (xQueueReceive(canMessageQueue, &msg, pdMS_TO_TICKS(100)) == pdTRUE) {
+      Serial.print("ID: 0x");
+      Serial.print(msg.id, HEX);
+      Serial.print(" DLC: ");
+      Serial.print(msg.len);
+      Serial.print(" Data: ");
+      for (int i = 0; i < msg.len; i++) {
+        Serial.print(msg.data[i], HEX);
+        Serial.print(" ");
+      }
+      Serial.println();
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+}
+
+void displayCANMessage(uint32_t id, uint8_t len, uint8_t* data) {
   if (displayLine >= MAX_LINES) {
     tft.fillScreen(ST77XX_BLACK);
     tft.setCursor(0, 0);
